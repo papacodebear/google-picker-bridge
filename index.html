@@ -75,8 +75,8 @@
       var picker = window.google.picker;
       var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
       var builder = new picker.PickerBuilder().addView(view).setOAuthToken(accessToken).setDeveloperKey(developerKey);
-      var afterSetOrigin = builder.setOrigin(origin);
-      console.log('[bridge] setOrigin returned same builder:', afterSetOrigin === builder, 'value:', afterSetOrigin);
+      var afterSetOrigin = builder.setOrigin(origin).setRelayUrl(origin);
+      console.log('[bridge] setOrigin+setRelayUrl returned same builder:', afterSetOrigin === builder, 'value:', afterSetOrigin);
       afterSetOrigin
         .setCallback(function (data) {
           if (data.action === picker.Action.PICKED) {
