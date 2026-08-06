@@ -67,22 +67,17 @@
     var source = event.source;
     var origin = event.origin;
 
+    console.log('[bridge] origin JSON:', JSON.stringify(origin), 'length:', origin.length, 'typeof:', typeof origin);
+    console.log('[bridge] accessToken present:', !!accessToken, 'developerKey present:', !!developerKey);
+
     loadPickerApi().then(function () {
+      console.log('[bridge] about to call setOrigin with:', JSON.stringify(origin));
       var picker = window.google.picker;
       var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
-      new picker.PickerBuilder()
-        .addView(view)
-        .setOAuthToken(accessToken)
-        .setDeveloperKey(developerKey)
-        // Required because this page runs inside an iframe (Google's own
-        // docs for setOrigin(): "set to the ... top-most page, if your
-        // application is running in an iframe") — without it, Picker
-        // auto-detects the real top-level embedding origin anyway (that's
-        // *why* the mismatch it then rejects names the extension's actual
-        // origin correctly) but refuses to trust it implicitly. `origin`
-        // here is event.origin from the incoming message — browser-
-        // verified, not something the sender could spoof.
-        .setOrigin(origin)
+      var builder = new picker.PickerBuilder().addView(view).setOAuthToken(accessToken).setDeveloperKey(developerKey);
+      var afterSetOrigin = builder.setOrigin(origin);
+      console.log('[bridge] setOrigin returned same builder:', afterSetOrigin === builder, 'value:', afterSetOrigin);
+      afterSetOrigin
         .setCallback(function (data) {
           if (data.action === picker.Action.PICKED) {
             var doc = data.docs && data.docs[0];
