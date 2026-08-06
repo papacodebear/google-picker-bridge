@@ -74,6 +74,15 @@
         .addView(view)
         .setOAuthToken(accessToken)
         .setDeveloperKey(developerKey)
+        // Required because this page runs inside an iframe (Google's own
+        // docs for setOrigin(): "set to the ... top-most page, if your
+        // application is running in an iframe") — without it, Picker
+        // auto-detects the real top-level embedding origin anyway (that's
+        // *why* the mismatch it then rejects names the extension's actual
+        // origin correctly) but refuses to trust it implicitly. `origin`
+        // here is event.origin from the incoming message — browser-
+        // verified, not something the sender could spoof.
+        .setOrigin(origin)
         .setCallback(function (data) {
           if (data.action === picker.Action.PICKED) {
             var doc = data.docs && data.docs[0];

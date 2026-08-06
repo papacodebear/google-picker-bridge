@@ -1,6 +1,6 @@
 # google-picker-bridge
 
-A tiny static page, hosted via GitHub Pages, that lets a browser extension use Google's Picker widget even when the browser's own extension-scheme origin (`moz-extension://...`) isn't one Google's Picker backend accepts.
+A tiny static page, hosted at [google-picker-bridge.papacodebear.workers.dev](https://google-picker-bridge.papacodebear.workers.dev/) via Cloudflare Pages (GitHub Pages was tried first — abandoned after repeated transient GitHub Actions OIDC-token deployment failures unrelated to this repo's own content), that lets a browser extension use Google's Picker widget even when the browser's own extension-scheme origin (`moz-extension://...`) isn't one Google's Picker backend accepts.
 
 ## Why this exists
 
