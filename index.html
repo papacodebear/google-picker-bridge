@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Google Drive Picker</title>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; background: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; }
 </style>
 </head>
 <body>
@@ -16,11 +16,24 @@
   // interception. That's deliberate: the REMOTE_SCRIPT restriction the
   // extension itself works around (see google-picker-offline-loader) is
   // about code shipped *inside* an extension bundle, not an external
-  // website the extension merely embeds via iframe. This page exists
-  // specifically because Google's Picker backend, confirmed live, accepts
-  // a real https:// origin (and, oddly, chrome-extension://) but rejects
+  // website the extension merely opens. This page exists specifically
+  // because Google's Picker backend, confirmed live, accepts a real
+  // https:// origin (and, oddly, chrome-extension://) but rejects
   // moz-extension:// outright with a genuine server-side 403 — this page
   // gives Firefox's side of that flow a real https:// origin to run from.
+  //
+  // Opened as a popup window (window.open), not embedded via <iframe> —
+  // tried first, and genuinely broken: Picker's own client-side check
+  // compares the origin it's told against window.location.ancestorOrigins
+  // (a real, browser-computed, unspoofable property of the actual frame-
+  // nesting chain), which — nested under the extension's own page — always
+  // reports the extension's real origin, no matter what this page claims.
+  // That's incompatible with also needing to present a real https://
+  // origin to Google's *server*-side check; no single value satisfies
+  // both. A popup has no ancestors at all — window.location.ancestorOrigins
+  // is empty, so that check is skipped entirely (it's explicitly guarded
+  // on ancestorOrigins.length > 0), and this page's own real https://
+  // origin satisfies the server-side check with nothing left to conflict.
   //
   // Protocol (window.postMessage, both directions):
   //   -> {type: 'keetar-picker-show', accessToken, developerKey}
@@ -67,40 +80,38 @@
     var source = event.source;
     var origin = event.origin;
 
-    console.log('[bridge] origin JSON:', JSON.stringify(origin), 'length:', origin.length, 'typeof:', typeof origin);
-    console.log('[bridge] accessToken present:', !!accessToken, 'developerKey present:', !!developerKey);
+    function reply(message) {
+      source.postMessage(message, origin);
+      window.close();
+    }
 
     loadPickerApi().then(function () {
-      console.log('[bridge] about to call setOrigin with:', JSON.stringify(origin));
       var picker = window.google.picker;
       var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
-      var builder = new picker.PickerBuilder().addView(view).setOAuthToken(accessToken).setDeveloperKey(developerKey);
-      var afterSetOrigin = builder.setOrigin(origin).setRelayUrl(origin);
-      console.log('[bridge] setOrigin+setRelayUrl returned same builder:', afterSetOrigin === builder, 'value:', afterSetOrigin);
-      afterSetOrigin
+      new picker.PickerBuilder()
+        .addView(view)
+        .setOAuthToken(accessToken)
+        .setDeveloperKey(developerKey)
         .setCallback(function (data) {
           if (data.action === picker.Action.PICKED) {
             var doc = data.docs && data.docs[0];
-            source.postMessage(
-              { type: 'keetar-picker-result', fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined },
-              origin
-            );
+            reply({ type: 'keetar-picker-result', fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
           } else if (data.action === picker.Action.CANCEL) {
-            source.postMessage({ type: 'keetar-picker-result', fileId: undefined }, origin);
+            reply({ type: 'keetar-picker-result', fileId: undefined });
           }
         })
         .build()
         .setVisible(true);
     }).catch(function (e) {
-      source.postMessage({ type: 'keetar-picker-error', message: String((e && e.message) || e) }, origin);
+      reply({ type: 'keetar-picker-error', message: String((e && e.message) || e) });
     });
   });
 
-  // Announced to '*' since we don't know the embedding extension's exact
+  // Announced to '*' since we don't know the opening extension's exact
   // origin until it sends us a message — safe, since this ping carries no
   // sensitive data, just an announcement that we're ready to receive one.
-  if (window.parent !== window) {
-    window.parent.postMessage({ type: 'keetar-picker-ready' }, '*');
+  if (window.opener) {
+    window.opener.postMessage({ type: 'keetar-picker-ready' }, '*');
   }
 })();
 </script>
