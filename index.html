@@ -49,6 +49,8 @@
   // extension ID/browser actually opened it without needing to know that
   // in advance.
 
+  console.log('[bridge] script started, window.opener present:', !!window.opener);
+
   function isTrustedOrigin(origin) {
     return origin.indexOf('chrome-extension://') === 0 || origin.indexOf('moz-extension://') === 0;
   }
@@ -56,13 +58,25 @@
   var pickerApiPromise = null;
   function loadPickerApi() {
     if (!pickerApiPromise) {
+      console.log('[bridge] loading https://apis.google.com/js/api.js');
       pickerApiPromise = new Promise(function (resolve, reject) {
         var script = document.createElement('script');
         script.src = 'https://apis.google.com/js/api.js';
         script.onload = function () {
-          window.gapi.load('picker', { callback: resolve, onerror: reject });
+          console.log('[bridge] api.js loaded, calling gapi.load(picker)');
+          window.gapi.load('picker', {
+            callback: function () {
+              console.log('[bridge] gapi.load(picker) callback fired');
+              resolve();
+            },
+            onerror: function (e) {
+              console.log('[bridge] gapi.load(picker) onerror:', e);
+              reject(e);
+            }
+          });
         };
-        script.onerror = function () {
+        script.onerror = function (e) {
+          console.log('[bridge] api.js failed to load:', e);
           reject(new Error('failed to load https://apis.google.com/js/api.js'));
         };
         document.head.appendChild(script);
@@ -72,20 +86,25 @@
   }
 
   window.addEventListener('message', function (event) {
+    console.log('[bridge] received message, origin:', event.origin, 'data:', JSON.stringify(event.data));
     if (!isTrustedOrigin(event.origin) || !event.data || event.data.type !== 'keetar-picker-show') {
+      console.log('[bridge] message ignored (untrusted origin or wrong type)');
       return;
     }
+    console.log('[bridge] message accepted, proceeding to load Picker');
     var accessToken = event.data.accessToken;
     var developerKey = event.data.developerKey;
     var source = event.source;
     var origin = event.origin;
 
     function reply(message) {
+      console.log('[bridge] replying:', JSON.stringify(message));
       source.postMessage(message, origin);
       window.close();
     }
 
     loadPickerApi().then(function () {
+      console.log('[bridge] Picker API ready, building PickerBuilder');
       var picker = window.google.picker;
       var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
       new picker.PickerBuilder()
@@ -93,6 +112,7 @@
         .setOAuthToken(accessToken)
         .setDeveloperKey(developerKey)
         .setCallback(function (data) {
+          console.log('[bridge] picker callback fired, action:', data.action);
           if (data.action === picker.Action.PICKED) {
             var doc = data.docs && data.docs[0];
             reply({ type: 'keetar-picker-result', fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
@@ -102,7 +122,9 @@
         })
         .build()
         .setVisible(true);
+      console.log('[bridge] setVisible(true) called');
     }).catch(function (e) {
+      console.log('[bridge] error loading Picker:', e);
       reply({ type: 'keetar-picker-error', message: String((e && e.message) || e) });
     });
   });
@@ -111,7 +133,10 @@
   // origin until it sends us a message — safe, since this ping carries no
   // sensitive data, just an announcement that we're ready to receive one.
   if (window.opener) {
+    console.log('[bridge] sending keetar-picker-ready to opener');
     window.opener.postMessage({ type: 'keetar-picker-ready' }, '*');
+  } else {
+    console.log('[bridge] no window.opener — cannot announce readiness');
   }
 })();
 </script>
