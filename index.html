@@ -28,35 +28,48 @@
   // (a real, browser-computed, unspoofable property of the actual frame-
   // nesting chain), which — nested under the extension's own page — always
   // reports the extension's real origin, no matter what this page claims.
-  // That's incompatible with also needing to present a real https://
-  // origin to Google's *server*-side check; no single value satisfies
-  // both. A popup has no ancestors at all — window.location.ancestorOrigins
-  // is empty, so that check is skipped entirely (it's explicitly guarded
-  // on ancestorOrigins.length > 0), and this page's own real https://
-  // origin satisfies the server-side check with nothing left to conflict.
+  // A popup has no ancestors at all, sidestepping that check entirely.
   //
-  // Protocol (window.postMessage, both directions):
-  //   -> {type: 'keetar-picker-show', accessToken, developerKey}
-  //      Sent repeatedly by the opener until acknowledged — this page
-  //      doesn't announce its own readiness via window.opener, since
-  //      window.opener is simply absent on Firefox for a popup opened
-  //      from a privileged extension page (confirmed live), evidently a
-  //      deliberate boundary against letting less-trusted opened content
-  //      reach back into extension-privileged code.
-  //   <- {type: 'keetar-picker-started'}                            (on first accepted show-request)
-  //   <- {type: 'keetar-picker-result', fileId?, name?}             (on pick/cancel)
-  //   <- {type: 'keetar-picker-error', message}                     (on failure)
-  //
-  // Trust model: incoming messages are checked against an extension-scheme
-  // origin before being acted on. Replies always go back via
-  // event.source.postMessage(data, event.origin) — both browser-verified,
-  // unspoofable properties of the received message — rather than a
-  // hardcoded target, so this works correctly for whichever specific
-  // extension ID/browser actually opened it without needing to know that
-  // in advance.
+  // Data flows through URLs in both directions, not window.postMessage —
+  // tried first, and genuinely broken on Firefox in both directions:
+  //   - Extension -> bridge: the opener re-sending a show-request on an
+  //     interval (to survive not knowing exactly when this page's message
+  //     listener attaches) needs a live reference to this window, and
+  //     window.open() calls not directly tied to a fresh user gesture
+  //     (i.e. every retry after the first) get silently popup-blocked,
+  //     returning null — confirmed live, not a hypothetical.
+  //   - Bridge -> extension: window.opener is simply absent here on
+  //     Firefox for a popup opened from a privileged extension page —
+  //     confirmed live — so there's no reference to reply through at all.
+  // So: the opener passes accessToken/developerKey/callbackUrl directly in
+  // this page's URL hash fragment (never sent to any server — hash
+  // fragments are client-side only) at window.open() time, read below on
+  // load, no message needed. On completion, this page navigates itself to
+  // callbackUrl (a small page bundled *in* the extension) with the result
+  // in its own hash fragment — that page runs with full extension
+  // privileges and relays the result via chrome.runtime.sendMessage,
+  // sidestepping cross-origin messaging entirely for this direction too.
 
-  function isTrustedOrigin(origin) {
-    return origin.indexOf('chrome-extension://') === 0 || origin.indexOf('moz-extension://') === 0;
+  function parseHashPayload() {
+    var raw = window.location.hash.slice(1);
+    if (!raw) {
+      return null;
+    }
+    try {
+      return JSON.parse(decodeURIComponent(raw));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  var payload = parseHashPayload();
+  if (!payload || !payload.accessToken || !payload.developerKey || !payload.callbackUrl) {
+    document.body.textContent = 'Missing or invalid Picker parameters.';
+    throw new Error('google-picker-bridge: missing or invalid hash payload');
+  }
+
+  function goToCallback(result) {
+    window.location.href = payload.callbackUrl + '#' + encodeURIComponent(JSON.stringify(result));
   }
 
   var pickerApiPromise = null;
@@ -77,52 +90,25 @@
     return pickerApiPromise;
   }
 
-  // The opener resends its show-request on an interval until acknowledged
-  // (see the protocol note above) — accept only the first one per page
-  // load, since PickerBuilder/setVisible(true) should only ever run once.
-  var handling = false;
-
-  window.addEventListener('message', function (event) {
-    if (!isTrustedOrigin(event.origin) || !event.data || event.data.type !== 'keetar-picker-show') {
-      return;
-    }
-    if (handling) {
-      return;
-    }
-    handling = true;
-
-    var accessToken = event.data.accessToken;
-    var developerKey = event.data.developerKey;
-    var source = event.source;
-    var origin = event.origin;
-
-    source.postMessage({ type: 'keetar-picker-started' }, origin);
-
-    function reply(message) {
-      source.postMessage(message, origin);
-      window.close();
-    }
-
-    loadPickerApi().then(function () {
-      var picker = window.google.picker;
-      var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
-      new picker.PickerBuilder()
-        .addView(view)
-        .setOAuthToken(accessToken)
-        .setDeveloperKey(developerKey)
-        .setCallback(function (data) {
-          if (data.action === picker.Action.PICKED) {
-            var doc = data.docs && data.docs[0];
-            reply({ type: 'keetar-picker-result', fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
-          } else if (data.action === picker.Action.CANCEL) {
-            reply({ type: 'keetar-picker-result', fileId: undefined });
-          }
-        })
-        .build()
-        .setVisible(true);
-    }).catch(function (e) {
-      reply({ type: 'keetar-picker-error', message: String((e && e.message) || e) });
-    });
+  loadPickerApi().then(function () {
+    var picker = window.google.picker;
+    var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
+    new picker.PickerBuilder()
+      .addView(view)
+      .setOAuthToken(payload.accessToken)
+      .setDeveloperKey(payload.developerKey)
+      .setCallback(function (data) {
+        if (data.action === picker.Action.PICKED) {
+          var doc = data.docs && data.docs[0];
+          goToCallback({ fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
+        } else if (data.action === picker.Action.CANCEL) {
+          goToCallback({ fileId: undefined });
+        }
+      })
+      .build()
+      .setVisible(true);
+  }).catch(function (e) {
+    goToCallback({ error: String((e && e.message) || e) });
   });
 })();
 </script>
