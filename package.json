@@ -1,0 +1,22 @@
+{
+  "name": "google-picker-bridge",
+  "version": "2026.8.7",
+  "description": "A self-hostable static page that gives Google's Picker widget a real https:// origin, for browser extensions whose own origin scheme (e.g. moz-extension://) Google's Picker backend won't accept.",
+  "license": "MIT",
+  "files": [
+    "index.html",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/papacodebear/google-picker-bridge.git"
+  },
+  "keywords": [
+    "google-picker",
+    "google-drive",
+    "browser-extension",
+    "webextension",
+    "oauth"
+  ]
+}
