@@ -50,38 +50,59 @@
   // privileges and relays the result via chrome.runtime.sendMessage,
   // sidestepping cross-origin messaging entirely for this direction too.
 
+  console.log('[bridge] page loaded, raw hash length:', window.location.hash.length);
+
   function parseHashPayload() {
     var raw = window.location.hash.slice(1);
     if (!raw) {
+      console.log('[bridge] hash is empty');
       return null;
     }
     try {
-      return JSON.parse(decodeURIComponent(raw));
+      var decoded = decodeURIComponent(raw);
+      var parsed = JSON.parse(decoded);
+      console.log('[bridge] parsed payload keys:', Object.keys(parsed), 'accessToken present:', !!parsed.accessToken, 'developerKey present:', !!parsed.developerKey, 'callbackUrl:', parsed.callbackUrl);
+      return parsed;
     } catch (e) {
+      console.log('[bridge] failed to parse hash payload:', e);
       return null;
     }
   }
 
   var payload = parseHashPayload();
   if (!payload || !payload.accessToken || !payload.developerKey || !payload.callbackUrl) {
+    console.log('[bridge] payload missing required fields, stopping here');
     document.body.textContent = 'Missing or invalid Picker parameters.';
     throw new Error('google-picker-bridge: missing or invalid hash payload');
   }
 
   function goToCallback(result) {
+    console.log('[bridge] navigating to callback with result:', JSON.stringify(result));
     window.location.href = payload.callbackUrl + '#' + encodeURIComponent(JSON.stringify(result));
   }
 
   var pickerApiPromise = null;
   function loadPickerApi() {
     if (!pickerApiPromise) {
+      console.log('[bridge] loading https://apis.google.com/js/api.js');
       pickerApiPromise = new Promise(function (resolve, reject) {
         var script = document.createElement('script');
         script.src = 'https://apis.google.com/js/api.js';
         script.onload = function () {
-          window.gapi.load('picker', { callback: resolve, onerror: reject });
+          console.log('[bridge] api.js loaded, calling gapi.load(picker)');
+          window.gapi.load('picker', {
+            callback: function () {
+              console.log('[bridge] gapi.load(picker) callback fired');
+              resolve();
+            },
+            onerror: function (e) {
+              console.log('[bridge] gapi.load(picker) onerror:', e);
+              reject(e);
+            }
+          });
         };
-        script.onerror = function () {
+        script.onerror = function (e) {
+          console.log('[bridge] api.js failed to load:', e);
           reject(new Error('failed to load https://apis.google.com/js/api.js'));
         };
         document.head.appendChild(script);
@@ -91,6 +112,7 @@
   }
 
   loadPickerApi().then(function () {
+    console.log('[bridge] Picker API ready, building PickerBuilder');
     var picker = window.google.picker;
     var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
     new picker.PickerBuilder()
@@ -98,6 +120,7 @@
       .setOAuthToken(payload.accessToken)
       .setDeveloperKey(payload.developerKey)
       .setCallback(function (data) {
+        console.log('[bridge] picker callback fired, action:', data.action);
         if (data.action === picker.Action.PICKED) {
           var doc = data.docs && data.docs[0];
           goToCallback({ fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
@@ -107,7 +130,9 @@
       })
       .build()
       .setVisible(true);
+    console.log('[bridge] setVisible(true) called');
   }).catch(function (e) {
+    console.log('[bridge] error loading Picker:', e);
     goToCallback({ error: String((e && e.message) || e) });
   });
 })();
