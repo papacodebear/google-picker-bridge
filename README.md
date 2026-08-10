@@ -48,9 +48,19 @@ any server; hash fragments are client-side only) containing JSON:
 https://your-bridge.example/#<encodeURIComponent(JSON.stringify({
   accessToken: "...",   // short-lived OAuth access token, drive.file scope
   developerKey: "...",  // your Google Picker API key
+  appId: "...",         // optional: your Google Cloud project number
   callbackUrl: "..."    // a URL this page will navigate to when done
 }))>
 ```
+
+`appId` matters for `drive.file` scope specifically: picking a file the
+caller didn't itself create only actually *grants* the caller access to it
+when the picker that showed it also had `setAppId()` set to the Google Cloud
+project number (the numeric prefix on an OAuth client ID, before its first
+hyphen, doubles as this by Google's own convention). Omit it and Picker still
+returns a real `fileId`/`name` — it just never registers the grant, so the
+caller's very next Drive API call for that file comes back a 404 that's
+easy to mistake for "file doesn't exist."
 
 **Out** — once Picker finishes (pick, cancel, or error), this page navigates
 itself to `callbackUrl` with the result in its own hash fragment:

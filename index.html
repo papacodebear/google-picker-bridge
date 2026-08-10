@@ -115,10 +115,23 @@
     console.log('[bridge] Picker API ready, building PickerBuilder');
     var picker = window.google.picker;
     var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
-    new picker.PickerBuilder()
+    // setAppId matters: under drive.file scope, picking a file the caller
+    // didn't itself create only actually *grants* it access when the
+    // picker that showed it also had setAppId() set to the Google Cloud
+    // project number — skip it and the picker still happily returns a
+    // real fileId/name, it just never registers the grant, so the
+    // caller's very next Drive API call for that file comes back 404.
+    // Optional (rather than required alongside accessToken/developerKey
+    // above) so an older caller that hasn't started sending appId yet
+    // still gets a working picker, just without the grant guarantee.
+    var builder = new picker.PickerBuilder()
       .addView(view)
       .setOAuthToken(payload.accessToken)
-      .setDeveloperKey(payload.developerKey)
+      .setDeveloperKey(payload.developerKey);
+    if (payload.appId) {
+      builder = builder.setAppId(payload.appId);
+    }
+    builder
       .setCallback(function (data) {
         console.log('[bridge] picker callback fired, action:', data.action);
         if (data.action === picker.Action.PICKED) {
