@@ -26,7 +26,7 @@ page the extension merely opens.
 
 ## How it's opened, and why
 
-`index.html` is meant to be opened as a **popup** (`window.open()`), not
+`public/index.html` is meant to be opened as a **popup** (`window.open()`), not
 embedded as an `<iframe>`. An iframe was tried first and doesn't work:
 Picker's own client-side check compares the origin it's told against
 `window.location.ancestorOrigins` — a browser-computed, unspoofable property
@@ -66,7 +66,7 @@ extension page has no `window.opener` there, and retrying via repeated
 `window.open()` calls gets silently popup-blocked once it's not tied to a
 fresh user gesture). Instead, data flows through URLs and `sessionStorage`:
 
-**In** — the caller opens `index.html` with a URL hash fragment (never sent
+**In** — the caller opens `public/index.html` with a URL hash fragment (never sent
 to any server; hash fragments are client-side only) containing JSON:
 
 ```
@@ -79,10 +79,11 @@ https://your-bridge.example/#<encodeURIComponent(JSON.stringify({
 }))>
 ```
 
-`index.html` stashes this in `sessionStorage`, then checks for a still-valid
-cached access token there. If none exists, it redirects (top-level, same
-window) to Google's OAuth consent screen with `redirect_uri` set to this
-site's own `auth-return.html`. That page verifies the returned `state`,
+`index.html` (the entry page) stashes this in `sessionStorage`, then checks
+for a still-valid cached access token there. If none exists, it redirects
+(top-level, same window) to Google's OAuth consent screen with `redirect_uri`
+set to this site's own `auth-return.html`. That page verifies the returned
+`state`,
 caches the resulting token in `sessionStorage`, and redirects back to `/` —
 which now finds a valid cached token and proceeds straight to Picker. A
 second pick within the same popup session reuses the cached token instead of
@@ -115,13 +116,15 @@ problems above, since it never leaves the extension's own privileged context.
 
 ## Using this
 
-Two files, `index.html` and `auth-return.html` — still no build step or
-server-side logic, but self-hosting now requires one extra one-time step:
-**register `https://your-bridge.example/auth-return.html` as an authorized
-redirect URI on your own OAuth 2.0 client in Google Cloud Console**,
-alongside whatever redirect URIs your extension's own OAuth flow already
-uses. Without that, Google will reject this site's own auth redirect with
-`redirect_uri_mismatch`.
+The static files live in `public/` — `index.html` and `auth-return.html` —
+deliberately kept separate from `package.json`/`node_modules` at the repo
+root, so a plain static deploy never accidentally sweeps up installed
+packages as if they were site content. Self-hosting requires one extra
+one-time step beyond copying the files: **register
+`https://your-bridge.example/auth-return.html` as an authorized redirect URI
+on your own OAuth 2.0 client in Google Cloud Console**, alongside whatever
+redirect URIs your extension's own OAuth flow already uses. Without that,
+Google will reject this site's own auth redirect with `redirect_uri_mismatch`.
 
 - **Use the hosted default.**
   [`google-picker-bridge.papacodebear.workers.dev`](https://google-picker-bridge.papacodebear.workers.dev/)
@@ -134,16 +137,19 @@ uses. Without that, Google will reject this site's own auth redirect with
   You still need your own OAuth client and API key either way (this site
   can't provide those); the choice below is only about whether you also
   host the static files yourself.
-- **Fork this repo and deploy your own copy.** Push both files as-is to
-  any static host — Cloudflare Pages, GitHub Pages, Netlify, an S3 bucket
-  with static hosting enabled, wherever. No npm needed for this route.
+- **Fork this repo and deploy your own copy.** This repo already includes a
+  `wrangler.jsonc` (assets pointed at `public/`) for deploying to Cloudflare
+  Workers as-is via `npm install && npm run deploy`. Any other static host —
+  Cloudflare Pages, GitHub Pages, Netlify, an S3 bucket with static hosting
+  enabled — works too; just publish the contents of `public/`, not the repo
+  root, so `node_modules` never ends up served as a "static asset."
 - **Install it as an npm dependency:**
 
   ```
   npm install google-picker-bridge
   ```
 
-  then copy `node_modules/google-picker-bridge/{index.html,auth-return.html}`
+  then copy `node_modules/google-picker-bridge/public/{index.html,auth-return.html}`
   into your own build output. This mainly helps if your deploy pipeline
   already pulls assets out of `node_modules` (Keetar's own webpack config
   does this for
