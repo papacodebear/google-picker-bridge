@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Signing in…</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  // OAuth redirect landing page; separate handshake ensures session cookie scoped to this origin for Picker.
+  var STATE_KEY = 'keetar-picker-state';
+  var TOKEN_KEY = 'keetar-picker-token';
+
+  var params = new URLSearchParams(window.location.hash.slice(1));
+  var expectedState = sessionStorage.getItem(STATE_KEY);
+  sessionStorage.removeItem(STATE_KEY);
+
+  var state = params.get('state');
+  if (!expectedState || state !== expectedState) {
+    document.body.textContent = 'Sign-in failed: state mismatch — possible response injection, aborting.';
+    throw new Error('google-picker-bridge/auth-return: state mismatch');
+  }
+
+  var accessToken = params.get('access_token');
+  var expiresIn = params.get('expires_in');
+  if (!accessToken || !expiresIn) {
+    var message = params.get('error_description') || params.get('error') || 'no access token returned.';
+    document.body.textContent = 'Sign-in failed: ' + message;
+    throw new Error('google-picker-bridge/auth-return: ' + message);
+  }
+
+  sessionStorage.setItem(TOKEN_KEY, JSON.stringify({
+    accessToken: accessToken,
+    expiresAt: Date.now() + Number(expiresIn) * 1000
+  }));
+
+  // Return to index.html with token; sessionStorage persists across cross-origin navigation.
+  window.location.href = '/';
+})();
+</script>
+</body>
+</html>

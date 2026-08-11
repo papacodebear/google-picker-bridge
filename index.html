@@ -10,75 +10,78 @@
 <body>
 <script>
 (function () {
-  // Bridges a browser extension (moz-extension:// / chrome-extension://
-  // origin) to Google's Picker widget, which this page loads the normal,
-  // fully-documented way (live from apis.google.com) — no vendoring, no
-  // interception. That's deliberate: the REMOTE_SCRIPT restriction the
-  // extension itself works around (see google-picker-offline-loader) is
-  // about code shipped *inside* an extension bundle, not an external
-  // website the extension merely opens. This page exists specifically
-  // because Google's Picker backend, confirmed live, accepts a real
-  // https:// origin (and, oddly, chrome-extension://) but rejects
-  // moz-extension:// outright with a genuine server-side 403 — this page
-  // gives Firefox's side of that flow a real https:// origin to run from.
-  //
-  // Opened as a popup window (window.open), not embedded via <iframe> —
-  // tried first, and genuinely broken: Picker's own client-side check
-  // compares the origin it's told against window.location.ancestorOrigins
-  // (a real, browser-computed, unspoofable property of the actual frame-
-  // nesting chain), which — nested under the extension's own page — always
-  // reports the extension's real origin, no matter what this page claims.
-  // A popup has no ancestors at all, sidestepping that check entirely.
-  //
-  // Data flows through URLs in both directions, not window.postMessage —
-  // tried first, and genuinely broken on Firefox in both directions:
-  //   - Extension -> bridge: the opener re-sending a show-request on an
-  //     interval (to survive not knowing exactly when this page's message
-  //     listener attaches) needs a live reference to this window, and
-  //     window.open() calls not directly tied to a fresh user gesture
-  //     (i.e. every retry after the first) get silently popup-blocked,
-  //     returning null — confirmed live, not a hypothetical.
-  //   - Bridge -> extension: window.opener is simply absent here on
-  //     Firefox for a popup opened from a privileged extension page —
-  //     confirmed live — so there's no reference to reply through at all.
-  // So: the opener passes accessToken/developerKey/callbackUrl directly in
-  // this page's URL hash fragment (never sent to any server — hash
-  // fragments are client-side only) at window.open() time, read below on
-  // load, no message needed. On completion, this page navigates itself to
-  // callbackUrl (a small page bundled *in* the extension) with the result
-  // in its own hash fragment — that page runs with full extension
-  // privileges and relays the result via chrome.runtime.sendMessage,
-  // sidestepping cross-origin messaging entirely for this direction too.
+  // Popup bridge from extension to Picker; uses URL-hash (not postMessage, which fails in Firefox) and handles own OAuth for cookie isolation.
+
+  var PAYLOAD_KEY = 'keetar-picker-payload';
+  var TOKEN_KEY = 'keetar-picker-token';
+  var STATE_KEY = 'keetar-picker-state';
+  var AUTH_RETURN_URL = 'https://google-picker-bridge.papacodebear.workers.dev/auth-return.html';
+  var TOKEN_EXPIRY_MARGIN_MS = 60000;
 
   console.log('[bridge] page loaded, raw hash length:', window.location.hash.length);
 
-  function parseHashPayload() {
+  // Page enters either fresh (payload in hash) or post-auth (payload from sessionStorage).
+  function loadPayload() {
     var raw = window.location.hash.slice(1);
-    if (!raw) {
-      console.log('[bridge] hash is empty');
+    if (raw) {
+      try {
+        var parsed = JSON.parse(decodeURIComponent(raw));
+        sessionStorage.setItem(PAYLOAD_KEY, JSON.stringify(parsed));
+        console.log('[bridge] parsed payload keys:', Object.keys(parsed), 'callbackUrl:', parsed.callbackUrl);
+        return parsed;
+      } catch (e) {
+        console.log('[bridge] failed to parse hash payload:', e);
+        return null;
+      }
+    }
+    var stored = sessionStorage.getItem(PAYLOAD_KEY);
+    if (!stored) {
+      console.log('[bridge] no hash and no stashed payload');
       return null;
     }
-    try {
-      var decoded = decodeURIComponent(raw);
-      var parsed = JSON.parse(decoded);
-      console.log('[bridge] parsed payload keys:', Object.keys(parsed), 'accessToken present:', !!parsed.accessToken, 'developerKey present:', !!parsed.developerKey, 'callbackUrl:', parsed.callbackUrl);
-      return parsed;
-    } catch (e) {
-      console.log('[bridge] failed to parse hash payload:', e);
-      return null;
-    }
+    console.log('[bridge] resuming with stashed payload (no hash — likely post-auth-redirect)');
+    return JSON.parse(stored);
   }
 
-  var payload = parseHashPayload();
-  if (!payload || !payload.accessToken || !payload.developerKey || !payload.callbackUrl) {
+  var payload = loadPayload();
+  if (!payload || !payload.developerKey || !payload.callbackUrl || !payload.clientId || !payload.scope) {
     console.log('[bridge] payload missing required fields, stopping here');
     document.body.textContent = 'Missing or invalid Picker parameters.';
-    throw new Error('google-picker-bridge: missing or invalid hash payload');
+    throw new Error('google-picker-bridge: missing or invalid payload');
   }
 
   function goToCallback(result) {
     console.log('[bridge] navigating to callback with result:', JSON.stringify(result));
     window.location.href = payload.callbackUrl + '#' + encodeURIComponent(JSON.stringify(result));
+  }
+
+  function getCachedAccessToken() {
+    var raw = sessionStorage.getItem(TOKEN_KEY);
+    if (!raw) {
+      return null;
+    }
+    try {
+      var token = JSON.parse(raw);
+      if (token.accessToken && token.expiresAt && Date.now() < token.expiresAt - TOKEN_EXPIRY_MARGIN_MS) {
+        return token.accessToken;
+      }
+    } catch (e) {
+      console.log('[bridge] failed to parse cached token:', e);
+    }
+    return null;
+  }
+
+  function redirectToGoogleAuth() {
+    var state = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random()).slice(2);
+    sessionStorage.setItem(STATE_KEY, state);
+    var authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', payload.clientId);
+    authUrl.searchParams.set('redirect_uri', AUTH_RETURN_URL);
+    authUrl.searchParams.set('response_type', 'token');
+    authUrl.searchParams.set('scope', payload.scope);
+    authUrl.searchParams.set('state', state);
+    console.log('[bridge] no valid cached token, redirecting to Google for auth');
+    window.location.href = authUrl.toString();
   }
 
   var pickerApiPromise = null;
@@ -111,43 +114,45 @@
     return pickerApiPromise;
   }
 
-  loadPickerApi().then(function () {
-    console.log('[bridge] Picker API ready, building PickerBuilder');
-    var picker = window.google.picker;
-    var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
-    // setAppId matters: under drive.file scope, picking a file the caller
-    // didn't itself create only actually *grants* it access when the
-    // picker that showed it also had setAppId() set to the Google Cloud
-    // project number — skip it and the picker still happily returns a
-    // real fileId/name, it just never registers the grant, so the
-    // caller's very next Drive API call for that file comes back 404.
-    // Optional (rather than required alongside accessToken/developerKey
-    // above) so an older caller that hasn't started sending appId yet
-    // still gets a working picker, just without the grant guarantee.
-    var builder = new picker.PickerBuilder()
-      .addView(view)
-      .setOAuthToken(payload.accessToken)
-      .setDeveloperKey(payload.developerKey);
-    if (payload.appId) {
-      builder = builder.setAppId(payload.appId);
-    }
-    builder
-      .setCallback(function (data) {
-        console.log('[bridge] picker callback fired, action:', data.action);
-        if (data.action === picker.Action.PICKED) {
-          var doc = data.docs && data.docs[0];
-          goToCallback({ fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
-        } else if (data.action === picker.Action.CANCEL) {
-          goToCallback({ fileId: undefined });
-        }
-      })
-      .build()
-      .setVisible(true);
-    console.log('[bridge] setVisible(true) called');
-  }).catch(function (e) {
-    console.log('[bridge] error loading Picker:', e);
-    goToCallback({ error: String((e && e.message) || e) });
-  });
+  function showPicker(accessToken) {
+    loadPickerApi().then(function () {
+      console.log('[bridge] Picker API ready, building PickerBuilder');
+      var picker = window.google.picker;
+      var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
+      // setAppId needed to register drive.file grant; without it, Picker returns fileId but API calls fail with 404.
+      var builder = new picker.PickerBuilder()
+        .addView(view)
+        .setOAuthToken(accessToken)
+        .setDeveloperKey(payload.developerKey);
+      if (payload.appId) {
+        builder = builder.setAppId(payload.appId);
+      }
+      builder
+        .setCallback(function (data) {
+          console.log('[bridge] picker callback fired, action:', data.action);
+          if (data.action === picker.Action.PICKED) {
+            var doc = data.docs && data.docs[0];
+            goToCallback({ fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
+          } else if (data.action === picker.Action.CANCEL) {
+            goToCallback({ fileId: undefined });
+          }
+        })
+        .build()
+        .setVisible(true);
+      console.log('[bridge] setVisible(true) called');
+    }).catch(function (e) {
+      console.log('[bridge] error loading Picker:', e);
+      goToCallback({ error: String((e && e.message) || e) });
+    });
+  }
+
+  var cachedAccessToken = getCachedAccessToken();
+  if (cachedAccessToken) {
+    console.log('[bridge] using cached access token');
+    showPicker(cachedAccessToken);
+  } else {
+    redirectToGoogleAuth();
+  }
 })();
 </script>
 </body>
