@@ -7,64 +7,53 @@ state stays scoped to that same origin throughout.
 
 ## Why this exists
 
-Google's Picker only runs from an origin it recognizes. Tested directly
-against Google's backend: it accepts requests where the `origin` parameter is
-a `chrome-extension://...` string (undocumented, but it works) — and rejects
-`moz-extension://...` outright, with a server-side 403. Same request, only
-the origin differs. There's no client-side fix for that — it's Google's
-backend, and Firefox extensions just aren't on the list.
-
-This site sidesteps the problem by giving Picker what it already accepts: an
-`https://` origin, hosted wherever you like.
-
-It loads Google's Picker the normal, fully-documented way (live from
-`apis.google.com`) — no vendoring, no interception. That's deliberate:
-Mozilla's `REMOTE_SCRIPT` add-on policy (the reason
-[`google-picker-offline-loader`](https://github.com/papacodebear/google-picker-offline-loader)
-exists) is about code shipped *inside* an extension bundle, not an external
-page the extension merely opens.
+Google's Picker only runs from an origin it recognizes: `chrome-extension://...`
+works (undocumented), `moz-extension://...` gets a server-side 403. No
+client-side fix — Firefox extensions just aren't on Google's list. This site
+sidesteps that by giving Picker an `https://` origin instead, hosted wherever
+you like. It loads Picker the normal, documented way (live from
+`apis.google.com`) — no vendoring, unlike
+[`google-picker-offline-loader`](https://github.com/papacodebear/google-picker-offline-loader),
+which exists for the different problem of code shipped *inside* an extension
+bundle under Mozilla's `REMOTE_SCRIPT` policy.
 
 ## How it's opened, and why
 
-`public/index.html` is meant to be opened as a **popup** (`window.open()`), not
-embedded as an `<iframe>`. An iframe was tried first and doesn't work:
-Picker's own client-side check compares the origin it's told against
-`window.location.ancestorOrigins` — a browser-computed, unspoofable property
-of the frame-nesting chain — which, nested under the extension's own page,
-always reports the extension's own origin no matter what this page claims. A
-popup has no ancestors at all, so that check never applies.
+`public/index.html` is meant to be opened as a **popup** (`window.open()`),
+not embedded as an `<iframe>`. An iframe doesn't work: Picker checks
+`window.location.ancestorOrigins`, a browser-computed property that, nested
+under the extension's own page, always reports the extension's origin no
+matter what this page claims. A popup has no ancestors, so that check never
+applies.
 
 ## Why this site runs its own OAuth handshake
 
-Earlier versions of this site received an already-obtained OAuth access token
-directly from the caller. That broke in two different ways once the API key
-this site uses had an HTTP referrer restriction configured on it (worth doing
-— see the trust-model section of `google-picker-offline-loader`'s docs on API
-key hygiene): Google's key validation, and Picker's own `drive.file`
-grant-registration at pick time, both apparently depend on a Google session
-cookie — one that only exists scoped to wherever the token's *original*
-consent redirect happened. For a caller whose own OAuth flow runs in a
-different top-level browsing context (a browser extension's
-`launchWebAuthFlow`, say), that's a different origin than this site — and
-Firefox's cross-site cookie isolation (on by default, not just under Strict
-tracking protection) keeps that cookie from ever being visible here,
-regardless of the user's ambient Google login state. Confirmed via a
-controlled test in a brand-new browser profile with no prior Google login at
-all — toggling *only* Firefox's cross-site cookie isolation flipped the
-failure on and off, everything else held constant.
+Earlier versions received an already-obtained access token from the caller.
+That broke because Google's key validation and Picker's `drive.file`
+grant-registration both depend on a Google session cookie scoped to wherever
+the token's *original* consent redirect happened — a different origin than
+this site when the caller's OAuth flow runs in its own top-level context
+(e.g. a browser extension's `launchWebAuthFlow`). Firefox's cross-site cookie
+isolation (on by default) then hides that cookie here regardless of the
+user's Google login state. Confirmed by toggling *only* that setting in a
+fresh profile and watching the failure flip on and off.
 
-So this site now runs its own separate implicit-grant OAuth redirect,
-entirely within its own origin, before it ever loads Picker — see Protocol
-below. Whatever session cookie Google's validation wants ends up scoped to
-the one place that actually needs it.
+So this site now runs its own separate OAuth redirect, entirely within its
+own origin, before it ever loads Picker — see Protocol below.
+
+This also means the bridge's OAuth client is registered as a **Web
+application** client in Cloud Console (it needs its own `https://` redirect
+URI, unlike a Chrome Extension client) — the type Google actually issues a
+client secret for. The bridge runs the authorization-code flow instead of
+the implicit grant, exchanging `code` for a token server-side via
+`POST /api/exchange-token`, authenticated with that secret.
 
 ## Protocol
 
-Not `window.postMessage` between the caller and this site — tried first, and
-broken on Firefox in both directions (a popup opened from a privileged
-extension page has no `window.opener` there, and retrying via repeated
-`window.open()` calls gets silently popup-blocked once it's not tied to a
-fresh user gesture). Instead, data flows through URLs and `sessionStorage`:
+Not `window.postMessage` — tried first, broken on Firefox in both directions
+(a popup from a privileged extension page has no `window.opener`, and
+retrying via repeated `window.open()` gets popup-blocked once it's not tied
+to a fresh user gesture). Instead, data flows through URLs and `sessionStorage`:
 
 **In** — the caller opens `public/index.html` with a URL hash fragment (never sent
 to any server; hash fragments are client-side only) containing JSON:
@@ -81,22 +70,24 @@ https://your-bridge.example/#<encodeURIComponent(JSON.stringify({
 
 `index.html` (the entry page) stashes this in `sessionStorage`, then checks
 for a still-valid cached access token there. If none exists, it redirects
-(top-level, same window) to Google's OAuth consent screen with `redirect_uri`
-set to this site's own `auth-return.html`. That page verifies the returned
-`state`,
-caches the resulting token in `sessionStorage`, and redirects back to `/` —
-which now finds a valid cached token and proceeds straight to Picker. A
-second pick within the same popup session reuses the cached token instead of
-repeating the redirect round trip.
+(top-level, same window) to Google's OAuth consent screen (`response_type=code`)
+with `redirect_uri` set to this site's own `auth-return.html`. That page
+verifies the returned `state`, then `POST`s the authorization `code` to this
+site's own `/api/exchange-token` — a Cloudflare Worker route, not a static
+file — which exchanges it for an access token using `client_id` (from the
+stashed payload) and this deployment's `GOOGLE_CLIENT_SECRET` (see
+Configuration below). The access token comes back to `auth-return.html`,
+gets cached in `sessionStorage`, and the page redirects to `/` — which now
+finds a valid cached token and proceeds straight to Picker. A second pick
+within the same popup session reuses the cached token instead of repeating
+the redirect round trip. The client secret itself never reaches the
+browser.
 
-`appId` matters for `drive.file` scope specifically: picking a file the
-caller didn't itself create only actually *grants* the caller access to it
-when the picker that showed it also had `setAppId()` set to the Google Cloud
-project number (the numeric prefix on an OAuth client ID, before its first
-hyphen, doubles as this by Google's own convention). Omit it and Picker still
-returns a real `fileId`/`name` — it just never registers the grant, so the
-caller's very next Drive API call for that file comes back a 404 that's
-easy to mistake for "file doesn't exist."
+`appId` matters for `drive.file` scope: picking a file the caller didn't
+itself create only *grants* access when the picker also had `setAppId()` set
+to the Cloud project number (the numeric prefix on an OAuth client ID).
+Omit it and Picker still returns a real `fileId`, but the caller's next
+Drive API call for it 404s.
 
 **Out** — once Picker finishes (pick, cancel, or error), this site navigates
 itself to `callbackUrl` with the result in its own hash fragment:
@@ -108,52 +99,41 @@ callbackUrl + '#' + encodeURIComponent(JSON.stringify({ fileId, name }))
 ```
 
 `callbackUrl` is expected to be a page *inside your own extension* (declared
-in `web_accessible_resources` so this site is allowed to navigate to it) that
-reads its own hash fragment and relays the result into the rest of the
-extension — e.g. via `chrome.runtime.sendMessage`, which works identically on
-Chrome and Firefox and isn't subject to any of the cross-origin messaging
-problems above, since it never leaves the extension's own privileged context.
+in `web_accessible_resources`) that reads its own hash fragment and relays
+the result via `chrome.runtime.sendMessage`, which works identically on
+Chrome and Firefox since it never leaves the extension's privileged context.
+
+## Configuration
+
+The token exchange needs `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`,
+available to `src/worker.js` as `env.*` — neither committed, neither sent to
+the browser. Set both as Worker secrets, either via `npx wrangler secret put
+<NAME>` or the Cloudflare dashboard (same underlying store; `wrangler deploy`
+doesn't touch either). `/api/exchange-token` rejects any `clientId` other
+than the configured one instead of forwarding it to Google.
+
+For local dev (`wrangler dev`), copy `.dev.vars.example` to `.dev.vars` and
+fill in values there — `.dev.vars` is gitignored.
 
 ## Using this
 
 The static files live in `public/` — `index.html` and `auth-return.html` —
-deliberately kept separate from `package.json`/`node_modules` at the repo
-root, so a plain static deploy never accidentally sweeps up installed
-packages as if they were site content. Self-hosting requires one extra
-one-time step beyond copying the files: **register
+kept separate from `package.json`/`node_modules` so a plain static deploy
+never sweeps those up as site content. The token exchange lives in
+`src/worker.js`, wired up via `wrangler.jsonc`'s `main` field alongside the
+`public/` assets — Cloudflare serves matching static files directly and
+only invokes the Worker for `/api/exchange-token`.
+
+Since `GOOGLE_CLIENT_SECRET` pins this deployment to one OAuth client, using
+your own client means forking and deploying your own copy — not pointing at
+the hosted default. Self-hosting needs: **register
 `https://your-bridge.example/auth-return.html` as an authorized redirect URI
-on your own OAuth 2.0 client in Google Cloud Console**, alongside whatever
-redirect URIs your extension's own OAuth flow already uses. Without that,
-Google will reject this site's own auth redirect with `redirect_uri_mismatch`.
-
-- **Use the hosted default.**
-  [`google-picker-bridge.papacodebear.workers.dev`](https://google-picker-bridge.papacodebear.workers.dev/)
-  runs this exact code, kept in sync with this repo. It doesn't hardcode any
-  particular OAuth client — `clientId`, `scope`, and `developerKey` all come
-  from the payload each caller supplies — so it works for your own extension
-  too, as long as you register
-  `https://google-picker-bridge.papacodebear.workers.dev/auth-return.html` as
-  an authorized redirect URI on *your own* OAuth client in Cloud Console.
-  You still need your own OAuth client and API key either way (this site
-  can't provide those); the choice below is only about whether you also
-  host the static files yourself.
-- **Fork this repo and deploy your own copy.** This repo already includes a
-  `wrangler.jsonc` (assets pointed at `public/`) for deploying to Cloudflare
-  Workers as-is via `npm install && npm run deploy`. Any other static host —
-  Cloudflare Pages, GitHub Pages, Netlify, an S3 bucket with static hosting
-  enabled — works too; just publish the contents of `public/`, not the repo
-  root, so `node_modules` never ends up served as a "static asset."
-- **Install it as an npm dependency:**
-
-  ```
-  npm install google-picker-bridge
-  ```
-
-  then copy `node_modules/google-picker-bridge/public/{index.html,auth-return.html}`
-  into your own build output. This mainly helps if your deploy pipeline
-  already pulls assets out of `node_modules` (Keetar's own webpack config
-  does this for
-  [`google-picker-offline-loader`](https://github.com/papacodebear/google-picker-offline-loader)).
+on your own Web application client in Google Cloud Console**, and **set
+`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`** (see Configuration above). Deploy
+as-is via `npm install && npm run deploy`. A different host is possible but
+means reimplementing `/api/exchange-token` yourself, since this is no longer
+a purely static site — `npm install google-picker-bridge` and copying
+`public/` + `src/worker.js` into your own build output covers that case.
 
 Whichever you pick, point your extension's Picker-launching code at that
 deployment's URL, and register its `auth-return.html` as an authorized
@@ -161,15 +141,18 @@ redirect URI on your OAuth client.
 
 ## Trust model / what this site does *not* do
 
-- No server-side logic, no database — pure static HTML/JS, safe to host on
-  infrastructure with zero backend of its own.
-- Holds no long-term secrets. The access token it obtains is short-lived,
-  cached only in `sessionStorage` (scoped to this site's own origin and to
-  the popup's tab — gone the moment that tab closes), and never sent to any
-  server other than Google's own APIs, which is what it's for.
+- Minimal server-side logic, no database. `src/worker.js`'s
+  `/api/exchange-token` route is a stateless proxy to Google's own token
+  endpoint, holding no data of its own.
+- Holds two long-term secrets — `GOOGLE_CLIENT_ID` and
+  `GOOGLE_CLIENT_SECRET`, stored as Cloudflare Worker secrets, never sent to
+  the browser — used only to authenticate the token exchange with Google.
+  The access token it gets back is short-lived, cached only in
+  `sessionStorage` on the client (gone once the popup's tab closes).
 - Doesn't authenticate the caller cryptographically — it doesn't need to,
-  since it never stores anything long-term and only ever hands its result to
-  whatever `callbackUrl` it was given at open time.
+  since it only ever hands its result to whatever `callbackUrl` it was given
+  at open time. The client secret authenticates the bridge to Google, not
+  the caller to the bridge.
 
 ## License
 

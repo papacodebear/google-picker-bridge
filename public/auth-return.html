@@ -10,35 +10,68 @@
 <body>
 <script>
 (function () {
-  // OAuth redirect landing page; separate handshake ensures session cookie scoped to this origin for Picker.
+  // OAuth redirect landing page for the bridge's own handshake.
+  var PAYLOAD_KEY = 'keetar-picker-payload';
   var STATE_KEY = 'keetar-picker-state';
   var TOKEN_KEY = 'keetar-picker-token';
+  var REDIRECT_URI_KEY = 'keetar-picker-redirect-uri';
 
-  var params = new URLSearchParams(window.location.hash.slice(1));
+  function fail(message) {
+    console.error('[auth-return] ' + message);
+    document.body.textContent = 'Sign-in failed: ' + message;
+    throw new Error('google-picker-bridge/auth-return: ' + message);
+  }
+
+  // Authorization code arrives via query string, not the hash.
+  var params = new URLSearchParams(window.location.search);
   var expectedState = sessionStorage.getItem(STATE_KEY);
   sessionStorage.removeItem(STATE_KEY);
 
   var state = params.get('state');
   if (!expectedState || state !== expectedState) {
-    document.body.textContent = 'Sign-in failed: state mismatch — possible response injection, aborting.';
-    throw new Error('google-picker-bridge/auth-return: state mismatch');
+    fail('state mismatch — possible response injection, aborting.');
   }
 
-  var accessToken = params.get('access_token');
-  var expiresIn = params.get('expires_in');
-  if (!accessToken || !expiresIn) {
-    var message = params.get('error_description') || params.get('error') || 'no access token returned.';
-    document.body.textContent = 'Sign-in failed: ' + message;
-    throw new Error('google-picker-bridge/auth-return: ' + message);
+  var code = params.get('code');
+  if (!code) {
+    fail(params.get('error_description') || params.get('error') || 'no authorization code returned.');
   }
 
-  sessionStorage.setItem(TOKEN_KEY, JSON.stringify({
-    accessToken: accessToken,
-    expiresAt: Date.now() + Number(expiresIn) * 1000
-  }));
+  var payloadRaw = sessionStorage.getItem(PAYLOAD_KEY);
+  var payload = payloadRaw ? JSON.parse(payloadRaw) : null;
+  if (!payload || !payload.clientId) {
+    fail('missing client ID — payload lost from sessionStorage.');
+  }
 
-  // Return to index.html with token; sessionStorage persists across cross-origin navigation.
-  window.location.href = '/';
+  // Must match the exact string Google saw in the authorize request, not window.location.
+  var redirectUri = sessionStorage.getItem(REDIRECT_URI_KEY);
+  sessionStorage.removeItem(REDIRECT_URI_KEY);
+  if (!redirectUri) {
+    fail('missing redirect URI — lost from sessionStorage.');
+  }
+
+  // Exchange happens server-side so the client secret never reaches this page's JS.
+  fetch('/api/exchange-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: code, clientId: payload.clientId, redirectUri: redirectUri })
+  })
+    .then(function (res) { return res.json(); })
+    .then(function (data) {
+      if (data.error || !data.accessToken) {
+        fail(data.error || 'token exchange returned no access token.');
+        return;
+      }
+      sessionStorage.setItem(TOKEN_KEY, JSON.stringify({
+        accessToken: data.accessToken,
+        expiresAt: Date.now() + Number(data.expiresIn) * 1000
+      }));
+      // sessionStorage persists across this cross-origin navigation back to index.html.
+      window.location.href = '/';
+    })
+    .catch(function (e) {
+      fail(e && e.message ? e.message : String(e));
+    });
 })();
 </script>
 </body>

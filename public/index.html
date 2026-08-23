@@ -10,15 +10,14 @@
 <body>
 <script>
 (function () {
-  // Popup bridge from extension to Picker; uses URL-hash (not postMessage, which fails in Firefox) and handles own OAuth for cookie isolation.
+  // Popup bridge: extension to Picker via URL hash, own OAuth for cookie isolation.
 
   var PAYLOAD_KEY = 'keetar-picker-payload';
   var TOKEN_KEY = 'keetar-picker-token';
   var STATE_KEY = 'keetar-picker-state';
   var AUTH_RETURN_URL = 'https://google-picker-bridge.papacodebear.workers.dev/auth-return.html';
   var TOKEN_EXPIRY_MARGIN_MS = 60000;
-
-  console.log('[bridge] page loaded, raw hash length:', window.location.hash.length);
+  var REDIRECT_URI_KEY = 'keetar-picker-redirect-uri';
 
   // Page enters either fresh (payload in hash) or post-auth (payload from sessionStorage).
   function loadPayload() {
@@ -27,31 +26,23 @@
       try {
         var parsed = JSON.parse(decodeURIComponent(raw));
         sessionStorage.setItem(PAYLOAD_KEY, JSON.stringify(parsed));
-        console.log('[bridge] parsed payload keys:', Object.keys(parsed), 'callbackUrl:', parsed.callbackUrl);
         return parsed;
       } catch (e) {
-        console.log('[bridge] failed to parse hash payload:', e);
+        console.error('[bridge] failed to parse hash payload:', e);
         return null;
       }
     }
     var stored = sessionStorage.getItem(PAYLOAD_KEY);
-    if (!stored) {
-      console.log('[bridge] no hash and no stashed payload');
-      return null;
-    }
-    console.log('[bridge] resuming with stashed payload (no hash — likely post-auth-redirect)');
-    return JSON.parse(stored);
+    return stored ? JSON.parse(stored) : null;
   }
 
   var payload = loadPayload();
   if (!payload || !payload.developerKey || !payload.callbackUrl || !payload.clientId || !payload.scope) {
-    console.log('[bridge] payload missing required fields, stopping here');
     document.body.textContent = 'Missing or invalid Picker parameters.';
     throw new Error('google-picker-bridge: missing or invalid payload');
   }
 
   function goToCallback(result) {
-    console.log('[bridge] navigating to callback with result:', JSON.stringify(result));
     window.location.href = payload.callbackUrl + '#' + encodeURIComponent(JSON.stringify(result));
   }
 
@@ -66,7 +57,7 @@
         return token.accessToken;
       }
     } catch (e) {
-      console.log('[bridge] failed to parse cached token:', e);
+      console.error('[bridge] failed to parse cached token:', e);
     }
     return null;
   }
@@ -74,38 +65,27 @@
   function redirectToGoogleAuth() {
     var state = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random()).slice(2);
     sessionStorage.setItem(STATE_KEY, state);
+    // Stashed as-is since window.location loses the .html Google actually saw.
+    sessionStorage.setItem(REDIRECT_URI_KEY, AUTH_RETURN_URL);
     var authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', payload.clientId);
     authUrl.searchParams.set('redirect_uri', AUTH_RETURN_URL);
-    authUrl.searchParams.set('response_type', 'token');
+    authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('scope', payload.scope);
     authUrl.searchParams.set('state', state);
-    console.log('[bridge] no valid cached token, redirecting to Google for auth');
     window.location.href = authUrl.toString();
   }
 
   var pickerApiPromise = null;
   function loadPickerApi() {
     if (!pickerApiPromise) {
-      console.log('[bridge] loading https://apis.google.com/js/api.js');
       pickerApiPromise = new Promise(function (resolve, reject) {
         var script = document.createElement('script');
         script.src = 'https://apis.google.com/js/api.js';
         script.onload = function () {
-          console.log('[bridge] api.js loaded, calling gapi.load(picker)');
-          window.gapi.load('picker', {
-            callback: function () {
-              console.log('[bridge] gapi.load(picker) callback fired');
-              resolve();
-            },
-            onerror: function (e) {
-              console.log('[bridge] gapi.load(picker) onerror:', e);
-              reject(e);
-            }
-          });
+          window.gapi.load('picker', { callback: resolve, onerror: reject });
         };
-        script.onerror = function (e) {
-          console.log('[bridge] api.js failed to load:', e);
+        script.onerror = function () {
           reject(new Error('failed to load https://apis.google.com/js/api.js'));
         };
         document.head.appendChild(script);
@@ -116,10 +96,9 @@
 
   function showPicker(accessToken) {
     loadPickerApi().then(function () {
-      console.log('[bridge] Picker API ready, building PickerBuilder');
       var picker = window.google.picker;
       var view = new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(false).setSelectFolderEnabled(false);
-      // setAppId needed to register drive.file grant; without it, Picker returns fileId but API calls fail with 404.
+      // Without setAppId, Picker returns a fileId but the caller's Drive API calls 404.
       var builder = new picker.PickerBuilder()
         .addView(view)
         .setOAuthToken(accessToken)
@@ -129,7 +108,6 @@
       }
       builder
         .setCallback(function (data) {
-          console.log('[bridge] picker callback fired, action:', data.action);
           if (data.action === picker.Action.PICKED) {
             var doc = data.docs && data.docs[0];
             goToCallback({ fileId: doc ? doc.id : undefined, name: doc ? doc.name : undefined });
@@ -139,16 +117,14 @@
         })
         .build()
         .setVisible(true);
-      console.log('[bridge] setVisible(true) called');
     }).catch(function (e) {
-      console.log('[bridge] error loading Picker:', e);
+      console.error('[bridge] error loading Picker:', e);
       goToCallback({ error: String((e && e.message) || e) });
     });
   }
 
   var cachedAccessToken = getCachedAccessToken();
   if (cachedAccessToken) {
-    console.log('[bridge] using cached access token');
     showPicker(cachedAccessToken);
   } else {
     redirectToGoogleAuth();
